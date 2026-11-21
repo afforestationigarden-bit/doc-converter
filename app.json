@@ -2,9 +2,13 @@
   "expo": {
     "name": "Doc Converter",
     "slug": "doc-converter",
+    "owner": "treeplantations-team",
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
-    "android": { "package": "com.docconverter.app" }
+    "android": { "package": "com.docconverter.app" },
+    "extra": {
+      "eas": { "projectId": "7b0e8bba-d039-4ebb-8bb8-4eb375256fa9" }
+    }
   }
 }
