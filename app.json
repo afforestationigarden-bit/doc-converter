@@ -1,0 +1,10 @@
+{
+  "expo": {
+    "name": "Doc Converter",
+    "slug": "doc-converter",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "android": { "package": "com.docconverter.app" }
+  }
+}
