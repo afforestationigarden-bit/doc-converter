@@ -190,7 +190,7 @@ export default function App() {
     <SafeAreaView style={s.root}>
       <StatusBar style="dark" />
       <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">
-        <Text style={s.title}>Doc Converter</Text>
+        <Text style={s.title}>Konvert</Text>
         <Text style={s.sub}>ইন্টারনেট ছাড়াই ফাইল কনভার্ট করো</Text>
 
         {TOOLS.map((t) => (
