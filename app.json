@@ -6,7 +6,14 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "light",
-    "android": { "package": "com.docconverter.app" },
+    "icon": "./assets/icon.png",
+    "android": {
+      "package": "com.docconverter.app",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#12343B"
+      }
+    },
     "extra": {
       "eas": { "projectId": "7b0e8bba-d039-4ebb-8bb8-4eb375256fa9" }
     }
