@@ -23,31 +23,24 @@ h1,h2,h3{margin:12px 0 6px}p{margin:0 0 8px}</style>`;
 
 const readBase64 = (uri) => FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
 
-async function shareData(name, data, encoding, mime) {
+async function makeFile(name, data, encoding, mime) {
   const dest = FileSystem.documentDirectory + name;
   await FileSystem.writeAsStringAsync(dest, data, { encoding });
-  if (await Sharing.isAvailableAsync()) {
-    await Sharing.shareAsync(dest, { mimeType: mime, dialogTitle: 'সেভ বা শেয়ার করো' });
-  } else {
-    Alert.alert('তৈরি হয়েছে', dest);
-  }
+  return { uri: dest, name, mime };
 }
 
 async function savePdfFromHtml(html, name) {
   const { uri } = await Print.printToFileAsync({ html });
-  const dest = FileSystem.documentDirectory + name + '.pdf';
+  const fileName = name + '.pdf';
+  const dest = FileSystem.documentDirectory + fileName;
   await FileSystem.copyAsync({ from: uri, to: dest });
-  if (await Sharing.isAvailableAsync()) {
-    await Sharing.shareAsync(dest, { mimeType: 'application/pdf', dialogTitle: 'PDF সেভ বা শেয়ার করো' });
-  } else {
-    Alert.alert('তৈরি হয়েছে', dest);
-  }
+  return { uri: dest, name: fileName, mime: 'application/pdf' };
 }
 
 async function docxParagraphs(uri) {
   const zip = await JSZip.loadAsync(await readBase64(uri), { base64: true });
   const xmlFile = zip.file('word/document.xml');
-  if (!xmlFile) throw new Error('এটি সঠিক .docx ফাইল নয়');
+  if (!xmlFile) throw new Error('This is not a valid .docx file');
   const xml = await xmlFile.async('string');
   const paras = xml.match(/<w:p[ >][\s\S]*?<\/w:p>/g) || [];
   return paras.map((p) => {
@@ -91,24 +84,24 @@ function parseRanges(input, total) {
   const idx = new Set();
   input.split(',').map((x) => x.trim()).filter(Boolean).forEach((part) => {
     const m = part.match(/^(\d+)(?:\s*-\s*(\d+))?$/);
-    if (!m) throw new Error(`"${part}" সঠিক নয়। উদাহরণ: 1-3,5`);
+    if (!m) throw new Error(`"${part}" is not valid. Example: 1-3,5`);
     const a = parseInt(m[1], 10);
     const b = m[2] ? parseInt(m[2], 10) : a;
-    if (a < 1 || b < a || b > total) throw new Error(`পাতা ১ থেকে ${total}-এর মধ্যে হতে হবে`);
+    if (a < 1 || b < a || b > total) throw new Error(`Page numbers must be between 1 and ${total}`);
     for (let i = a; i <= b; i++) idx.add(i - 1);
   });
-  if (!idx.size) throw new Error('কোন পাতা নেবে তা লেখো');
+  if (!idx.size) throw new Error('Enter which pages to extract');
   return [...idx];
 }
 
 const TOOLS = [
-  { id: 'img', title: 'ছবি → PDF', hint: 'এক বা একাধিক ছবি বেছে একটি PDF বানাও' },
-  { id: 'txt', title: 'লেখা → PDF', hint: 'টাইপ বা পেস্ট করা লেখা থেকে PDF' },
-  { id: 'docx', title: 'Word → PDF', hint: '.docx ফাইলের লেখা ও মৌলিক ফরম্যাট থেকে PDF' },
-  { id: 'docx2txt', title: 'Word → লেখা (.txt)', hint: '.docx ফাইল থেকে সাধারণ লেখা বের করো' },
-  { id: 'txt2docx', title: 'লেখা → Word (.docx)', hint: 'টাইপ বা পেস্ট করা লেখা থেকে Word ফাইল' },
-  { id: 'merge', title: 'PDF জোড়া লাগাও', hint: 'একাধিক PDF বেছে একটি PDF বানাও' },
-  { id: 'split', title: 'PDF থেকে পাতা আলাদা করো', hint: 'নির্দিষ্ট পাতা নিয়ে নতুন PDF বানাও' },
+  { id: 'img', title: 'Image → PDF', hint: 'Combine one or more images into a PDF' },
+  { id: 'txt', title: 'Text → PDF', hint: 'Turn typed or pasted text into a PDF' },
+  { id: 'docx', title: 'Word → PDF', hint: 'Convert a .docx file (text and basic formatting) to PDF' },
+  { id: 'docx2txt', title: 'Word → Text (.txt)', hint: 'Extract plain text from a .docx file' },
+  { id: 'txt2docx', title: 'Text → Word (.docx)', hint: 'Turn typed or pasted text into a Word file' },
+  { id: 'merge', title: 'Merge PDFs', hint: 'Combine multiple PDFs into one' },
+  { id: 'split', title: 'Split PDF', hint: 'Extract chosen pages into a new PDF' },
 ];
 const NEEDS_TEXT = ['txt', 'txt2docx'];
 
@@ -117,12 +110,36 @@ export default function App() {
   const [text, setText] = useState('');
   const [range, setRange] = useState('');
   const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+  const [dirUri, setDirUri] = useState(null);
 
   const run = async (fn) => {
     setBusy(true);
-    try { await fn(); } catch (e) { Alert.alert('সমস্যা হয়েছে', String(e.message || e)); }
+    try { const r = await fn(); if (r) setResult(r); } catch (e) { Alert.alert('Something went wrong', String(e.message || e)); }
     setBusy(false);
   };
+
+  const shareFile = () => run(async () => {
+    if (!result) return;
+    if (!(await Sharing.isAvailableAsync())) throw new Error('Sharing is not available on this phone');
+    await Sharing.shareAsync(result.uri, { mimeType: result.mime, dialogTitle: 'Share' });
+  });
+
+  const downloadFile = () => run(async () => {
+    if (!result) return;
+    const SAF = FileSystem.StorageAccessFramework;
+    let dir = dirUri;
+    if (!dir) {
+      const perm = await SAF.requestDirectoryPermissionsAsync();
+      if (!perm.granted) return;
+      dir = perm.directoryUri;
+      setDirUri(dir);
+    }
+    const b64 = await readBase64(result.uri);
+    const dest = await SAF.createFileAsync(dir, result.name.replace(/\.[^.]+$/, ''), result.mime);
+    await FileSystem.writeAsStringAsync(dest, b64, { encoding: 'base64' });
+    Alert.alert('Downloaded', result.name + ' was saved to the folder you chose.');
+  });
 
   const pick = async (type, multiple = false) => {
     const res = await DocumentPicker.getDocumentAsync({ type, multiple, copyToCacheDirectory: true });
@@ -137,52 +154,52 @@ export default function App() {
       for (const a of files) {
         imgs.push(`<img src="data:${a.mimeType || 'image/jpeg'};base64,${await readBase64(a.uri)}"/>`);
       }
-      await savePdfFromHtml(pageCss + imgs.join(''), 'images-' + Date.now());
+      return savePdfFromHtml(pageCss + imgs.join(''), 'images-' + Date.now());
     },
     txt: async () => {
-      if (!text.trim()) throw new Error('আগে কিছু লেখো');
+      if (!text.trim()) throw new Error('Type some text first');
       const body = text.split('\n').map((l) => `<p>${esc(l) || '&nbsp;'}</p>`).join('');
-      await savePdfFromHtml(pageCss + body, 'text-' + Date.now());
+      return savePdfFromHtml(pageCss + body, 'text-' + Date.now());
     },
     docx: async () => {
       const f = await pick(DOCX);
       if (!f) return;
       const paras = await docxParagraphs(f[0].uri);
       const html = pageCss + paras.map((p) => `<${p.tag}>${p.html || '&nbsp;'}</${p.tag}>`).join('');
-      await savePdfFromHtml(html, (f[0].name || 'document').replace(/\.docx$/i, ''));
+      return savePdfFromHtml(html, (f[0].name || 'document').replace(/\.docx$/i, ''));
     },
     docx2txt: async () => {
       const f = await pick(DOCX);
       if (!f) return;
       const paras = await docxParagraphs(f[0].uri);
       const name = (f[0].name || 'document').replace(/\.docx$/i, '') + '.txt';
-      await shareData(name, paras.map((p) => p.text).join('\n'), 'utf8', 'text/plain');
+      return makeFile(name, paras.map((p) => p.text).join('\n'), 'utf8', 'text/plain');
     },
     txt2docx: async () => {
-      if (!text.trim()) throw new Error('আগে কিছু লেখো');
-      await shareData('text-' + Date.now() + '.docx', await buildDocx(text), 'base64', DOCX);
+      if (!text.trim()) throw new Error('Type some text first');
+      return makeFile('text-' + Date.now() + '.docx', await buildDocx(text), 'base64', DOCX);
     },
     merge: async () => {
       const files = await pick('application/pdf', true);
       if (!files) return;
-      if (files.length < 2) throw new Error('কমপক্ষে ২টি PDF বেছে নাও');
+      if (files.length < 2) throw new Error('Select at least 2 PDFs');
       const out = await PDFDocument.create();
       for (const a of files) {
         const src = await PDFDocument.load(await readBase64(a.uri));
         const pages = await out.copyPages(src, src.getPageIndices());
         pages.forEach((p) => out.addPage(p));
       }
-      await shareData('merged-' + Date.now() + '.pdf', await out.saveAsBase64(), 'base64', 'application/pdf');
+      return makeFile('merged-' + Date.now() + '.pdf', await out.saveAsBase64(), 'base64', 'application/pdf');
     },
     split: async () => {
-      if (!range.trim()) throw new Error('আগে পাতার নম্বর লেখো, যেমন 1-3,5');
+      if (!range.trim()) throw new Error('Enter page numbers first, e.g. 1-3,5');
       const f = await pick('application/pdf');
       if (!f) return;
       const src = await PDFDocument.load(await readBase64(f[0].uri));
       const idx = parseRanges(range, src.getPageCount());
       const out = await PDFDocument.create();
       (await out.copyPages(src, idx)).forEach((p) => out.addPage(p));
-      await shareData('pages-' + Date.now() + '.pdf', await out.saveAsBase64(), 'base64', 'application/pdf');
+      return makeFile('pages-' + Date.now() + '.pdf', await out.saveAsBase64(), 'base64', 'application/pdf');
     },
   };
 
@@ -191,31 +208,46 @@ export default function App() {
       <StatusBar style="dark" />
       <ScrollView contentContainerStyle={s.scroll} keyboardShouldPersistTaps="handled">
         <Text style={s.title}>Konvert</Text>
-        <Text style={s.sub}>ইন্টারনেট ছাড়াই ফাইল কনভার্ট করো</Text>
+        <Text style={s.sub}>Convert files without internet</Text>
 
         {TOOLS.map((t) => (
-          <TouchableOpacity key={t.id} style={[s.card, tool === t.id && s.cardOn]} onPress={() => setTool(t.id)}>
+          <TouchableOpacity key={t.id} style={[s.card, tool === t.id && s.cardOn]} onPress={() => { setTool(t.id); setResult(null); }}>
             <Text style={s.cardTitle}>{t.title}</Text>
             <Text style={s.cardHint}>{t.hint}</Text>
           </TouchableOpacity>
         ))}
 
         {NEEDS_TEXT.includes(tool) && (
-          <TextInput style={s.input} multiline placeholder="এখানে লেখো বা পেস্ট করো" value={text} onChangeText={setText} textAlignVertical="top" />
+          <TextInput style={s.input} multiline placeholder="Type or paste your text here" value={text} onChangeText={setText} textAlignVertical="top" />
         )}
         {tool === 'split' && (
-          <TextInput style={[s.input, { minHeight: 52 }]} placeholder="কোন পাতা? যেমন 1-3,5" value={range} onChangeText={setRange} keyboardType="numbers-and-punctuation" />
+          <TextInput style={[s.input, { minHeight: 52 }]} placeholder="Which pages? e.g. 1-3,5" value={range} onChangeText={setRange} keyboardType="numbers-and-punctuation" />
         )}
 
         {tool && (
           <TouchableOpacity style={s.btn} disabled={busy} onPress={() => run(actions[tool])}>
             {busy ? <ActivityIndicator color={C.ink} /> : (
-              <Text style={s.btnText}>{NEEDS_TEXT.includes(tool) ? 'তৈরি করো' : 'ফাইল বেছে শুরু করো'}</Text>
+              <Text style={s.btnText}>{NEEDS_TEXT.includes(tool) ? 'Create' : 'Choose file & start'}</Text>
             )}
           </TouchableOpacity>
         )}
 
-        <Text style={s.note}>PDF → Word ও PDF → লেখা এই সংস্করণে নেই। Word ফাইলের ছবি ও জটিল টেবিল আসবে না।</Text>
+        {result && (
+          <View style={s.result}>
+            <Text style={s.resultTitle}>File created</Text>
+            <Text style={s.resultName}>{result.name}</Text>
+            <View style={s.row}>
+              <TouchableOpacity style={[s.btn, s.half]} disabled={busy} onPress={downloadFile}>
+                <Text style={s.btnText}>Download</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[s.btn, s.half, s.btnAlt]} disabled={busy} onPress={shareFile}>
+                <Text style={s.btnText}>Share</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
+
+        <Text style={s.note}>PDF → Word and PDF → Text are not in this version. Images and complex tables in Word files will not appear in the PDF.</Text>
       </ScrollView>
     </SafeAreaView>
   );
@@ -233,5 +265,11 @@ const s = StyleSheet.create({
   input: { backgroundColor: C.white, borderColor: C.line, borderWidth: 1, borderRadius: 14, padding: 14, minHeight: 160, fontSize: 16, marginBottom: 12 },
   btn: { backgroundColor: C.accent, borderRadius: 14, padding: 16, alignItems: 'center', marginTop: 4 },
   btnText: { fontSize: 17, fontWeight: '700', color: C.ink },
+  result: { backgroundColor: C.white, borderColor: C.ink, borderWidth: 2, borderRadius: 14, padding: 16, marginTop: 16 },
+  resultTitle: { fontSize: 16, fontWeight: '700', color: C.ink },
+  resultName: { fontSize: 14, color: C.ink, opacity: 0.7, marginTop: 4, marginBottom: 12 },
+  row: { flexDirection: 'row', gap: 10 },
+  half: { flex: 1, marginTop: 0 },
+  btnAlt: { backgroundColor: C.paper, borderColor: C.ink, borderWidth: 1.5 },
   note: { fontSize: 13, color: C.ink, opacity: 0.6, marginTop: 20, lineHeight: 19 },
 });
