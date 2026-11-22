@@ -2,7 +2,10 @@
   "name": "doc-converter",
   "version": "1.0.0",
   "main": "node_modules/expo/AppEntry.js",
-  "scripts": { "start": "expo start", "android": "expo start --android" },
+  "scripts": {
+    "start": "expo start",
+    "android": "expo start --android"
+  },
   "dependencies": {
     "expo": "~54.0.0",
     "expo-document-picker": "~14.0.0",
@@ -12,6 +15,7 @@
     "expo-status-bar": "~3.0.0",
     "jszip": "^3.10.1",
     "react": "19.1.0",
-    "react-native": "0.81.4"
+    "react-native": "0.81.4",
+    "pdf-lib": "^1.17.1"
   }
 }
