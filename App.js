@@ -9,7 +9,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as Print from 'expo-print';
 import * as Sharing from 'expo-sharing';
 import JSZip from 'jszip';
-import { PDFDocument } from 'pdf-lib';
+import KonvertPdf from './modules/konvert-pdf';
 
 const C = { ink: '#12343B', paper: '#F7F5F0', accent: '#E0A458', line: '#D9D4C7', white: '#FFFFFF' };
 const DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
@@ -20,6 +20,14 @@ const decode = (s) => s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&qu
 const pageCss = `<style>body{font-family:sans-serif;font-size:12pt;line-height:1.5;padding:24px;color:#111}
 img{max-width:100%;max-height:95vh;display:block;margin:0 auto;page-break-after:always}
 h1,h2,h3{margin:12px 0 6px}p{margin:0 0 8px}</style>`;
+
+const OUT = FileSystem.cacheDirectory + 'konvert-out/';
+const LEVELS = {
+  high: { label: 'High', hint: 'Sharpest, smaller reduction', maxDim: 2400, quality: 85 },
+  medium: { label: 'Medium', hint: 'Balanced', maxDim: 1800, quality: 70 },
+  low: { label: 'Low', hint: 'Smallest file', maxDim: 1300, quality: 55 },
+};
+const fmtSize = (b) => (b >= 1048576 ? (b / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(b / 1024)) + ' KB');
 
 const readBase64 = (uri) => FileSystem.readAsStringAsync(uri, { encoding: 'base64' });
 
@@ -100,8 +108,9 @@ const TOOLS = [
   { id: 'docx', title: 'Word → PDF', hint: 'Convert a .docx file (text and basic formatting) to PDF' },
   { id: 'docx2txt', title: 'Word → Text (.txt)', hint: 'Extract plain text from a .docx file' },
   { id: 'txt2docx', title: 'Text → Word (.docx)', hint: 'Turn typed or pasted text into a Word file' },
-  { id: 'merge', title: 'Merge PDFs', hint: 'Combine multiple PDFs into one' },
-  { id: 'split', title: 'Split PDF', hint: 'Extract chosen pages into a new PDF' },
+  { id: 'merge', title: 'Merge PDFs', hint: 'Combine multiple PDFs into one (works with large files)' },
+  { id: 'split', title: 'Split PDF', hint: 'Extract chosen pages into a new PDF (works with large files)' },
+  { id: 'compress', title: 'Compress PDF', hint: 'Reduce file size while keeping text and images clear' },
 ];
 const NEEDS_TEXT = ['txt', 'txt2docx'];
 
@@ -109,13 +118,20 @@ export default function App() {
   const [tool, setTool] = useState(null);
   const [text, setText] = useState('');
   const [range, setRange] = useState('');
+  const [level, setLevel] = useState('medium');
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const [dirUri, setDirUri] = useState(null);
 
   const run = async (fn) => {
     setBusy(true);
-    try { const r = await fn(); if (r) setResult(r); } catch (e) { Alert.alert('Something went wrong', String(e.message || e)); }
+    try {
+      const r = await fn();
+      if (r) {
+        if (result && result.uri !== r.uri) FileSystem.deleteAsync(result.uri, { idempotent: true }).catch(() => {});
+        setResult(r);
+      }
+    } catch (e) { Alert.alert('Something went wrong', String(e.message || e)); }
     setBusy(false);
   };
 
@@ -135,9 +151,8 @@ export default function App() {
       dir = perm.directoryUri;
       setDirUri(dir);
     }
-    const b64 = await readBase64(result.uri);
     const dest = await SAF.createFileAsync(dir, result.name.replace(/\.[^.]+$/, ''), result.mime);
-    await FileSystem.writeAsStringAsync(dest, b64, { encoding: 'base64' });
+    await KonvertPdf.copyToUri(result.uri, dest);
     Alert.alert('Downloaded', result.name + ' was saved to the folder you chose.');
   });
 
@@ -183,23 +198,32 @@ export default function App() {
       const files = await pick('application/pdf', true);
       if (!files) return;
       if (files.length < 2) throw new Error('Select at least 2 PDFs');
-      const out = await PDFDocument.create();
-      for (const a of files) {
-        const src = await PDFDocument.load(await readBase64(a.uri));
-        const pages = await out.copyPages(src, src.getPageIndices());
-        pages.forEach((p) => out.addPage(p));
-      }
-      return makeFile('merged-' + Date.now() + '.pdf', await out.saveAsBase64(), 'base64', 'application/pdf');
+      const name = 'merged-' + Date.now() + '.pdf';
+      const r = await KonvertPdf.mergePdfs(files.map((f) => f.uri), OUT + name);
+      return { uri: 'file://' + r.path, name, mime: 'application/pdf', info: 'Size: ' + fmtSize(r.outputBytes) };
     },
     split: async () => {
       if (!range.trim()) throw new Error('Enter page numbers first, e.g. 1-3,5');
       const f = await pick('application/pdf');
       if (!f) return;
-      const src = await PDFDocument.load(await readBase64(f[0].uri));
-      const idx = parseRanges(range, src.getPageCount());
-      const out = await PDFDocument.create();
-      (await out.copyPages(src, idx)).forEach((p) => out.addPage(p));
-      return makeFile('pages-' + Date.now() + '.pdf', await out.saveAsBase64(), 'base64', 'application/pdf');
+      const total = await KonvertPdf.getPageCount(f[0].uri);
+      const idx = parseRanges(range, total);
+      const name = 'pages-' + Date.now() + '.pdf';
+      const r = await KonvertPdf.splitPdf(f[0].uri, idx, OUT + name);
+      return { uri: 'file://' + r.path, name, mime: 'application/pdf', info: idx.length + ' of ' + total + ' pages, ' + fmtSize(r.outputBytes) };
+    },
+    compress: async () => {
+      const f = await pick('application/pdf');
+      if (!f) return;
+      const p = LEVELS[level];
+      const name = (f[0].name || 'document').replace(/\.pdf$/i, '') + '-compressed.pdf';
+      const r = await KonvertPdf.compressPdf(f[0].uri, OUT + name, p.maxDim, p.quality);
+      const before = f[0].size || 0;
+      let info = before > 0
+        ? fmtSize(before) + ' → ' + fmtSize(r.outputBytes) + ' (' + Math.round((1 - r.outputBytes / before) * 100) + '% smaller)'
+        : 'Size: ' + fmtSize(r.outputBytes);
+      info += '\n' + r.replaced + ' of ' + r.total + ' images were recompressed.';
+      return { uri: 'file://' + r.path, name, mime: 'application/pdf', info };
     },
   };
 
@@ -224,6 +248,17 @@ export default function App() {
           <TextInput style={[s.input, { minHeight: 52 }]} placeholder="Which pages? e.g. 1-3,5" value={range} onChangeText={setRange} keyboardType="numbers-and-punctuation" />
         )}
 
+        {tool === 'compress' && (
+          <View style={s.levels}>
+            {Object.keys(LEVELS).map((k) => (
+              <TouchableOpacity key={k} style={[s.level, level === k && s.levelOn]} onPress={() => setLevel(k)}>
+                <Text style={s.levelTitle}>{LEVELS[k].label}</Text>
+                <Text style={s.levelHint}>{LEVELS[k].hint}</Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+        )}
+
         {tool && (
           <TouchableOpacity style={s.btn} disabled={busy} onPress={() => run(actions[tool])}>
             {busy ? <ActivityIndicator color={C.ink} /> : (
@@ -232,10 +267,13 @@ export default function App() {
           </TouchableOpacity>
         )}
 
+        {busy && <Text style={s.note}>Working… large files can take a few minutes. Please keep the app open.</Text>}
+
         {result && (
           <View style={s.result}>
             <Text style={s.resultTitle}>File created</Text>
             <Text style={s.resultName}>{result.name}</Text>
+            {result.info ? <Text style={s.resultInfo}>{result.info}</Text> : null}
             <View style={s.row}>
               <TouchableOpacity style={[s.btn, s.half]} disabled={busy} onPress={downloadFile}>
                 <Text style={s.btnText}>Download</Text>
@@ -268,6 +306,12 @@ const s = StyleSheet.create({
   result: { backgroundColor: C.white, borderColor: C.ink, borderWidth: 2, borderRadius: 14, padding: 16, marginTop: 16 },
   resultTitle: { fontSize: 16, fontWeight: '700', color: C.ink },
   resultName: { fontSize: 14, color: C.ink, opacity: 0.7, marginTop: 4, marginBottom: 12 },
+  resultInfo: { fontSize: 14, color: C.ink, marginBottom: 12, lineHeight: 20 },
+  levels: { flexDirection: 'row', gap: 8, marginBottom: 12 },
+  level: { flex: 1, backgroundColor: C.white, borderColor: C.line, borderWidth: 1, borderRadius: 12, padding: 10 },
+  levelOn: { borderColor: C.ink, borderWidth: 2 },
+  levelTitle: { fontSize: 15, fontWeight: '700', color: C.ink },
+  levelHint: { fontSize: 12, color: C.ink, opacity: 0.65, marginTop: 2 },
   row: { flexDirection: 'row', gap: 10 },
   half: { flex: 1, marginTop: 0 },
   btnAlt: { backgroundColor: C.paper, borderColor: C.ink, borderWidth: 1.5 },
