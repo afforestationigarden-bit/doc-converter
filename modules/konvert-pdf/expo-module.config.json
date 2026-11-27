@@ -1,1 +1,6 @@
-
+{
+  "platforms": ["android"],
+  "android": {
+    "modules": ["expo.modules.konvertpdf.KonvertPdfModule"]
+  }
+}
